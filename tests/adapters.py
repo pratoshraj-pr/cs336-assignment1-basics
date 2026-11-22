@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from collections import defaultdict
 from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+
+from cs336_basics.pretokenization_example import run_pre_tokenizer
+from cs336_basics.tokenizer import train_bpe
 
 
 def run_linear(
@@ -589,4 +593,10 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    data_b_c = run_pre_tokenizer(input_path, spl_tok=special_tokens)
+
+    vocab = dict([(i, bytes([i])) for i in range(256)])
+    vocab.update(dict([(i + len(vocab), tok.encode("utf-8")) for i, tok in enumerate(special_tokens)]))
+
+    vocab, merges, data_b_c = train_bpe(data_b_c, vocab, vocab_size)
+    return vocab, merges

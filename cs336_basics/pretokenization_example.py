@@ -1,5 +1,11 @@
 import os
 from typing import BinaryIO
+from collections import defaultdict
+from functools import partial
+import regex as re
+import multiprocessing as mp
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
 def find_chunk_boundaries(
@@ -49,14 +55,50 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-## Usage
-with open(..., "rb") as f:
-    num_processes = 4
-    boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+def pre_tokenizer_regex(txt):
+    return re.finditer(PAT, txt)
 
-    # The following is a serial implementation, but you can parallelize this
-    # by sending each start/end pair to a set of processes.
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
+
+def pre_tokenizer(txt, spl_tok="<|endoftext|>"):
+    tok_cnt = {}
+    pattern = "|".join(map(re.escape, spl_tok))
+    txt = re.split(pattern, txt)
+
+    for doc in txt:
+        for match in pre_tokenizer_regex(doc):
+            tok_cnt[match.group()] = tok_cnt.get(match.group(), 0) + 1
+    return tok_cnt
+
+
+def pre_tokenize_chunk(span, data_path, spl_tok):
+    # each worker reads its own byte range, so the parent never holds the whole file
+    start, end = span
+    with open(data_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        # Run pre-tokenization on your chunk and store the counts for each pre-token
+    return pre_tokenizer(chunk, spl_tok)
+
+
+def run_pre_tokenizer(data_path, spl_tok, num_processes=4, num_chunks=None):
+    num_chunks = num_chunks or num_processes
+    with open(data_path, "rb") as f:
+        if spl_tok:
+            boundaries = find_chunk_boundaries(f, num_chunks, spl_tok[0].encode("utf-8"))
+        else:
+            boundaries = [0, f.seek(0, os.SEEK_END)]
+
+    spans = list(zip(boundaries[:-1], boundaries[1:]))
+    pre_tokenizer_func = partial(pre_tokenize_chunk, data_path=data_path, spl_tok=spl_tok)
+
+    # merge counts as chunks finish instead of collecting every chunk's dict first
+    str_counts = defaultdict(int)
+    with mp.get_context("fork").Pool(processes=num_processes) as pool:
+        for res in pool.imap_unordered(pre_tokenizer_func, spans):
+            for tok, cnt in res.items():
+                str_counts[tok] += cnt
+
+    data_pre_tok = defaultdict(int)
+    for tok, cnt in str_counts.items():
+        data_pre_tok[tuple([bytes([t]) for t in tok.encode("utf-8")])] += cnt
+
+    return data_pre_tok
